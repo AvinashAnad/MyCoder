@@ -1,0 +1,27 @@
+[project]
+name = "mycoder"
+version = "0.1.0"
+description = "Local AI coding assistant powered by Ollama"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.28",
+    "rich>=13.0",
+    "faiss-cpu>=1.7",
+    "numpy>=1.24",
+    "networkx>=3.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+mycoder = "mycoder.app:main"
+
+[tool.setuptools.package-data]
+mycoder = ["builtins/*.md", "dag/prompts/*.md"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["mycoder/tests"]
