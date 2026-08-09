@@ -15,7 +15,7 @@ Local AI coding assistant powered by Ollama — like Claude Code, but with your 
 - **Graphify** — dependency graph analysis of any repository
 - **Streaming metrics** — tokens/sec, context size, latency
 
-## Screenshot
+## Sneak Peak
 
 ![MyCoder](assets/screenshot.png)
 
