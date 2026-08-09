@@ -1,0 +1,30 @@
+# MyCoder — Code Owners
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything
+* @AvinashAnad
+
+# Core modules
+mycoder/app.py          @AvinashAnad
+mycoder/client.py       @AvinashAnad
+mycoder/tools.py        @AvinashAnad
+mycoder/sandbox.py      @AvinashAnad
+mycoder/vector_store.py @AvinashAnad
+mycoder/skills.py       @AvinashAnad
+mycoder/ui.py           @AvinashAnad
+
+# DAG orchestrator
+mycoder/dag/            @AvinashAnad
+
+# MCP server
+mycoder/mcp/            @AvinashAnad
+
+# Skills
+mycoder/builtins/       @AvinashAnad
+
+# Tests
+mycoder/tests/          @AvinashAnad
+
+# Config & install
+pyproject.toml          @AvinashAnad
+install.sh              @AvinashAnad
