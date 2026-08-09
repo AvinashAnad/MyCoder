@@ -1,8 +1,11 @@
 """Ollama API client with streaming and tool support."""
 
 import json
+import logging
 import requests
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 OLLAMA_BASE = "http://localhost:11434"
 
@@ -39,6 +42,12 @@ class ChatResponse:
     thinking: str = ""
     tool_calls: list = field(default_factory=list)
     metrics: Metrics = field(default_factory=Metrics)
+    done_reason: str = ""
+    error: str = ""
+
+    @property
+    def is_empty(self):
+        return not self.content.strip() and not self.tool_calls
 
 
 class OllamaClient:
@@ -87,44 +96,71 @@ class OllamaClient:
 
         response = ChatResponse()
 
-        with self.session.post(
-            f"{self.base_url}/api/chat",
-            json=payload,
-            stream=True,
-            timeout=(10, 600),
-        ) as resp:
-            resp.raise_for_status()
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                data = json.loads(line)
+        try:
+            with self.session.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                stream=True,
+                timeout=(10, 600),
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.warning("Malformed stream line: %s", line[:100])
+                        continue
 
-                if "message" in data:
-                    msg = data["message"]
+                    if data.get("error"):
+                        response.error = data["error"]
+                        logger.error("Ollama error: %s", response.error)
+                        break
 
-                    token = msg.get("content", "")
-                    if token:
-                        if on_token:
-                            on_token(token)
-                        response.content += token
+                    if "message" in data:
+                        msg = data["message"]
 
-                    thinking = msg.get("thinking", "")
-                    if thinking:
-                        if on_thinking:
-                            on_thinking(thinking)
-                        response.thinking += thinking
+                        token = msg.get("content", "")
+                        if token:
+                            if on_token:
+                                on_token(token)
+                            response.content += token
 
-                    if msg.get("tool_calls"):
-                        response.tool_calls = msg["tool_calls"]
+                        thinking = msg.get("thinking", "")
+                        if thinking:
+                            if on_thinking:
+                                on_thinking(thinking)
+                            response.thinking += thinking
 
-                if data.get("done"):
-                    response.metrics = Metrics(
-                        prompt_tokens=data.get("prompt_eval_count", 0),
-                        completion_tokens=data.get("eval_count", 0),
-                        prompt_eval_duration=data.get("prompt_eval_duration", 0) / 1e9,
-                        eval_duration=data.get("eval_duration", 0) / 1e9,
-                        total_duration=data.get("total_duration", 0) / 1e9,
-                        load_duration=data.get("load_duration", 0) / 1e9,
-                    )
+                        if msg.get("tool_calls"):
+                            response.tool_calls = msg["tool_calls"]
+
+                    if data.get("done"):
+                        response.done_reason = data.get("done_reason", "stop")
+                        response.metrics = Metrics(
+                            prompt_tokens=data.get("prompt_eval_count", 0),
+                            completion_tokens=data.get("eval_count", 0),
+                            prompt_eval_duration=data.get("prompt_eval_duration", 0) / 1e9,
+                            eval_duration=data.get("eval_duration", 0) / 1e9,
+                            total_duration=data.get("total_duration", 0) / 1e9,
+                            load_duration=data.get("load_duration", 0) / 1e9,
+                        )
+
+        except requests.exceptions.ChunkedEncodingError as e:
+            logger.error("Stream broken mid-response: %s", e)
+            response.error = f"Stream interrupted: {e}"
+        except requests.exceptions.ConnectionError as e:
+            logger.error("Connection lost: %s", e)
+            response.error = f"Connection lost: {e}"
+        except requests.exceptions.Timeout as e:
+            logger.error("Request timed out: %s", e)
+            response.error = f"Timeout: {e}"
+
+        logger.info(
+            "Response: %d chars, %d thinking, %d tool_calls, done_reason=%s",
+            len(response.content), len(response.thinking),
+            len(response.tool_calls), response.done_reason,
+        )
 
         return response

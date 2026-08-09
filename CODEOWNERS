@@ -11,6 +11,7 @@ mycoder/tools.py        @AvinashAnad
 mycoder/sandbox.py      @AvinashAnad
 mycoder/vector_store.py @AvinashAnad
 mycoder/skills.py       @AvinashAnad
+mycoder/session.py      @AvinashAnad
 mycoder/ui.py           @AvinashAnad
 
 # DAG orchestrator

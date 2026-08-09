@@ -16,6 +16,9 @@ dependencies = [
 [project.scripts]
 mycoder = "mycoder.app:main"
 
+[tool.setuptools.packages.find]
+include = ["mycoder*"]
+
 [tool.setuptools.package-data]
 mycoder = ["builtins/*.md", "dag/prompts/*.md"]
 

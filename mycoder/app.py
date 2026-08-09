@@ -3,17 +3,23 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from mycoder.client import OllamaClient
 from mycoder.sandbox import Sandbox
+from mycoder.session import Session
 from mycoder.skills import SkillManager
 from mycoder.tools import TOOL_DEFINITIONS, NEEDS_CONFIRMATION, ToolExecutor, is_safe_command
 from mycoder.ui import UI
 
 MAX_TOOL_ROUNDS = 20
+MAX_EMPTY_RETRIES = 2
+
+LOG_DIR = Path.home() / ".mycoder" / "logs"
 
 SYSTEM_PROMPT = """\
 You are MyCoder, a local AI coding assistant with direct access to the user's filesystem.
@@ -29,7 +35,30 @@ Rules:
 - Use tools proactively — don't ask permission to read a file, just read it.
 - When editing, use edit_file with the exact text to replace.
 - For new files, use write_file.
-- Explain what you changed and why, briefly."""
+- Explain what you changed and why, briefly.
+- Always provide a response to the user. Never return empty."""
+
+logger = logging.getLogger("mycoder")
+
+
+def setup_logging():
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = LOG_DIR / f"mycoder_{datetime.now().strftime('%Y%m%d')}.log"
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+
+    root = logging.getLogger("mycoder")
+    root.setLevel(logging.DEBUG)
+    root.addHandler(file_handler)
+
+    for mod in ("mycoder.client", "mycoder.sandbox", "mycoder.session",
+                "mycoder.vector_store", "mycoder.dag"):
+        logging.getLogger(mod).setLevel(logging.DEBUG)
 
 
 class MyCoder:
@@ -41,6 +70,7 @@ class MyCoder:
         self.ui = UI()
         self.vector_store = None
         self.dag_executor = None
+        self.session = Session()
         self.messages = []
         self.model = None
         self.options = {}
@@ -48,6 +78,7 @@ class MyCoder:
         self.dag_mode = False
 
     def run(self):
+        setup_logging()
         args = self._parse_args()
 
         if not self.client.is_running():
@@ -100,6 +131,7 @@ class MyCoder:
         p.add_argument("-t", "--temperature", type=float, help="Sampling temperature")
         p.add_argument("--ctx", type=int, help="Context window size")
         p.add_argument("-d", "--dir", help="Working directory (sandbox root)")
+        p.add_argument("--resume", action="store_true", help="Resume last session")
 
         sub = p.add_subparsers(dest="command")
         sub.add_parser("models", help="List available models")
@@ -168,6 +200,40 @@ class MyCoder:
         running = self.client.running_models()
         self.model = self.ui.prompt_model_selection(models, running)
 
+    def _save_session(self):
+        self.session.model = self.model
+        self.session.messages = self.messages
+        self.session.metadata = {
+            "sandbox_root": self.sandbox.root if self.sandbox else None,
+            "dag_mode": self.dag_mode,
+        }
+        self.session.save()
+
+    def _load_session(self, session_id=None):
+        if session_id:
+            s = Session()
+            if not s.load(session_id):
+                self.ui.error(f"Session not found: {session_id}")
+                return False
+        else:
+            s = Session.latest()
+            if not s:
+                self.ui.error("No previous sessions found.")
+                return False
+
+        self.session = s
+        self.messages = s.messages
+        if s.model:
+            self.model = s.model
+
+        user_msgs = [m for m in s.messages if m.get("role") == "user"]
+        self.ui.success(
+            f"Resumed session {s.session_id} "
+            f"({len(user_msgs)} user messages, model: {s.model})"
+        )
+        logger.info("Resumed session %s", s.session_id)
+        return True
+
     def _interactive(self, args):
         models = self.client.list_models()
         if not models:
@@ -182,19 +248,32 @@ class MyCoder:
                 self.ui.error(f"Not a directory: {args.dir}")
 
         self.ui.show_banner(len(models))
-        self._select_model(args)
-        self.ui.show_model_selected(self.model)
+
+        if getattr(args, "resume", False):
+            if self._load_session():
+                self.ui.show_model_selected(self.model)
+            else:
+                self._select_model(args)
+                self.ui.show_model_selected(self.model)
+                self.messages = [{"role": "system", "content": self._build_system_prompt()}]
+        else:
+            self._select_model(args)
+            self.ui.show_model_selected(self.model)
+            self.messages = [{"role": "system", "content": self._build_system_prompt()}]
+
         self._init_dag()
         self.options = self._build_options(args)
-        self.messages = [{"role": "system", "content": self._build_system_prompt()}]
 
         status_parts = []
         if self.sandbox:
             status_parts.append(f"Sandbox: {self.sandbox.root}")
         if self.vector_store:
             status_parts.append(f"FAISS: {self.vector_store.count} entries")
-        if status_parts:
-            self.ui.info("  ".join(status_parts))
+        status_parts.append(f"Session: {self.session.session_id}")
+        self.ui.info("  ".join(status_parts))
+
+        log_file = LOG_DIR / f"mycoder_{datetime.now().strftime('%Y%m%d')}.log"
+        self.ui.info(f"Log: {log_file}")
 
         while True:
             user_input = self.ui.get_input()
@@ -203,6 +282,7 @@ class MyCoder:
 
             if user_input.startswith("/"):
                 if not self._handle_command(user_input):
+                    self._save_session()
                     break
                 continue
 
@@ -210,6 +290,8 @@ class MyCoder:
                 self._dag_chat(user_input)
             else:
                 self._chat(user_input)
+
+            self._save_session()
 
     def _handle_command(self, raw):
         parts = raw.split(maxsplit=1)
@@ -239,7 +321,8 @@ class MyCoder:
 
         elif cmd == "/clear":
             self.messages = [{"role": "system", "content": self._build_system_prompt()}]
-            self.ui.success("Conversation cleared.")
+            self.session = Session()
+            self.ui.success("Conversation cleared. New session started.")
 
         elif cmd == "/cd":
             if not arg:
@@ -291,6 +374,24 @@ class MyCoder:
                 else:
                     self.ui.info("No MCP calls recorded.")
 
+        elif cmd == "/save":
+            self._save_session()
+            self.ui.success(f"Session saved: {self.session.session_id}")
+
+        elif cmd == "/resume":
+            self._load_session(arg if arg else None)
+
+        elif cmd == "/sessions":
+            sessions = Session.list_sessions()
+            if sessions:
+                for s in sessions:
+                    self.ui.info(
+                        f"  {s['id']}  model={s['model']}  "
+                        f"msgs={s['messages']}  {s['saved_at']}"
+                    )
+            else:
+                self.ui.info("No saved sessions.")
+
         else:
             skill = self.skills.get(cmd.lstrip("/"))
             if skill and skill.type == "prompt":
@@ -304,29 +405,12 @@ class MyCoder:
 
     def _chat(self, user_input):
         self.messages.append({"role": "user", "content": user_input})
+        logger.info("User: %s", user_input[:200])
 
-        for _ in range(MAX_TOOL_ROUNDS):
-            self.ui.start_response()
-
-            try:
-                response = self.client.chat_stream(
-                    model=self.model,
-                    messages=self.messages,
-                    tools=TOOL_DEFINITIONS,
-                    options=self.options,
-                    on_token=self.ui.stream_token,
-                    on_thinking=self.ui.stream_thinking,
-                )
-            except KeyboardInterrupt:
-                self.ui.end_response()
-                self.ui.info("Interrupted.")
+        for round_num in range(MAX_TOOL_ROUNDS):
+            response = self._call_model_with_retry()
+            if response is None:
                 return
-            except Exception as e:
-                self.ui.end_response()
-                self.ui.error(f"API error: {e}")
-                return
-
-            self.ui.end_response()
 
             assistant_msg = {"role": "assistant", "content": response.content}
             if response.tool_calls:
@@ -336,7 +420,7 @@ class MyCoder:
             self.ui.show_turn_metrics(response.metrics)
 
             if not response.tool_calls:
-                if self.vector_store:
+                if self.vector_store and response.content.strip():
                     try:
                         self.vector_store.add(
                             query=user_input,
@@ -355,6 +439,7 @@ class MyCoder:
                     try:
                         args = json.loads(args)
                     except json.JSONDecodeError:
+                        logger.warning("Bad tool args: %s", args)
                         self.ui.error(f"Bad tool args: {args}")
                         self.messages.append({
                             "role": "tool",
@@ -379,16 +464,84 @@ class MyCoder:
                 result = self.tools.execute(name, args)
                 self.ui.show_tool_result(result)
                 self.ui.stats.total_tool_calls += 1
+                logger.info("Tool %s -> %d chars", name, len(result))
 
                 self.messages.append({"role": "tool", "content": result})
         else:
             self.ui.error(f"Hit tool-call limit ({MAX_TOOL_ROUNDS} rounds).")
+            logger.warning("Tool-call limit reached")
+
+    def _call_model_with_retry(self):
+        for attempt in range(MAX_EMPTY_RETRIES + 1):
+            self.ui.start_response()
+
+            try:
+                response = self.client.chat_stream(
+                    model=self.model,
+                    messages=self.messages,
+                    tools=TOOL_DEFINITIONS,
+                    options=self.options,
+                    on_token=self.ui.stream_token,
+                    on_thinking=self.ui.stream_thinking,
+                )
+            except KeyboardInterrupt:
+                self.ui.end_response()
+                self.ui.info("Interrupted.")
+                return None
+            except Exception as e:
+                self.ui.end_response()
+                logger.error("API error: %s", e, exc_info=True)
+                self.ui.error(f"API error: {e}")
+                return None
+
+            self.ui.end_response()
+
+            if response.error:
+                logger.error("Model error: %s", response.error)
+                self.ui.error(f"Model error: {response.error}")
+                if attempt < MAX_EMPTY_RETRIES:
+                    self.ui.info(f"Retrying ({attempt + 1}/{MAX_EMPTY_RETRIES})...")
+                    continue
+                return None
+
+            if response.is_empty:
+                logger.warning(
+                    "Empty response (attempt %d, thinking=%d chars, done_reason=%s)",
+                    attempt + 1, len(response.thinking), response.done_reason,
+                )
+                if attempt < MAX_EMPTY_RETRIES:
+                    self.ui.info(
+                        f"Model returned empty response. "
+                        f"Retrying ({attempt + 1}/{MAX_EMPTY_RETRIES})..."
+                    )
+                    self.messages.append({
+                        "role": "assistant", "content": "(empty)",
+                    })
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous response was empty. "
+                            "Please provide a complete answer."
+                        ),
+                    })
+                    continue
+                self.ui.error(
+                    "Model returned empty response after retries. "
+                    "Try a different model or rephrase your query."
+                )
+                logger.error("Empty response after %d retries", MAX_EMPTY_RETRIES)
+                return None
+
+            return response
+
+        return None
 
     def _dag_chat(self, user_input):
         from mycoder.dag.planner import parse_plan, PLANNER_PROMPT
         from mycoder.dag.graph import DAGGraph
 
         self.ui.info("Planning with DAG orchestrator...")
+        logger.info("DAG mode: %s", user_input[:200])
 
         messages = [
             {"role": "system", "content": PLANNER_PROMPT},
@@ -402,12 +555,14 @@ class MyCoder:
                 options={"temperature": 0.2},
             )
         except Exception as e:
+            logger.error("Planner error: %s", e, exc_info=True)
             self.ui.error(f"Planner error: {e}")
             self._chat(user_input)
             return
 
         plan = parse_plan(response.content, user_input)
         self.ui.info(f"Plan: {len(plan.nodes)} nodes")
+        logger.info("Plan: %d nodes", len(plan.nodes))
 
         graph = DAGGraph()
         for node in plan.nodes:
@@ -415,6 +570,7 @@ class MyCoder:
 
         def on_progress(nid, state):
             self.ui.info(f"  {nid}: {state.value}")
+            logger.info("DAG node %s: %s", nid, state.value)
 
         try:
             loop = asyncio.new_event_loop()
@@ -423,6 +579,7 @@ class MyCoder:
             )
             loop.close()
         except Exception as e:
+            logger.error("DAG execution error: %s", e, exc_info=True)
             self.ui.error(f"DAG execution error: {e}")
             self._chat(user_input)
             return
@@ -445,6 +602,7 @@ class MyCoder:
                     pass
         else:
             self.ui.error("DAG produced no output — falling back to direct chat.")
+            logger.warning("DAG produced no output, falling back")
             self._chat(user_input)
 
 
