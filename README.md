@@ -13,6 +13,9 @@ Local AI coding assistant powered by Ollama — like Claude Code, but with your 
 - **Sandboxing** — all file operations confined to a root directory
 - **MCP server** — expose tools via Model Context Protocol for external integrations
 - **Graphify** — dependency graph analysis of any repository
+- **Session persistence** — auto-saves conversations, resume with `--resume` or `/resume`
+- **Logging** — structured file logging to `~/.mycoder/logs/`
+- **Retry on empty** — auto-retries when model returns empty response (up to 2 retries)
 - **Streaming metrics** — tokens/sec, context size, latency
 
 ## Sneak Peak
@@ -123,6 +126,7 @@ mycoder                    # start interactive session
 mycoder -m qwen3.6         # start with specific model
 mycoder -d /path/to/code   # set sandbox root
 mycoder --ctx 16384        # set context window
+mycoder --resume           # resume last session
 ```
 
 ### One-shot mode
@@ -157,6 +161,9 @@ mycoder models
 | `/cd <path>` | Change working directory |
 | `/dag` | Toggle DAG orchestration mode |
 | `/search <q>` | Search past queries (FAISS) |
+| `/save` | Save current session |
+| `/resume [id]` | Resume a saved session |
+| `/sessions` | List saved sessions |
 | `/mcp-log` | Show tracked MCP calls |
 | `/exit` | Quit |
 
@@ -298,6 +305,9 @@ MyCoder uses `~/.mycoder/` for user data:
 ```
 ~/.mycoder/
 ├── skills/           # Custom skill .md files
+├── sessions/         # Saved conversation sessions
+├── logs/             # Daily log files
+│   └── mycoder_YYYYMMDD.log
 └── vector_store/     # FAISS index + metadata
     ├── index.faiss
     └── entries.json
