@@ -18,6 +18,7 @@ from mycoder.ui import UI
 
 MAX_TOOL_ROUNDS = 20
 MAX_EMPTY_RETRIES = 2
+MAX_TOOL_RESULT_CHARS = 8000
 
 LOG_DIR = Path.home() / ".mycoder" / "logs"
 
@@ -471,6 +472,22 @@ class MyCoder:
             self.ui.error(f"Hit tool-call limit ({MAX_TOOL_ROUNDS} rounds).")
             logger.warning("Tool-call limit reached")
 
+    def _trim_context(self):
+        trimmed = 0
+        for msg in self.messages:
+            if msg.get("role") == "tool":
+                content = msg.get("content", "")
+                if len(content) > MAX_TOOL_RESULT_CHARS:
+                    original_len = len(content)
+                    msg["content"] = (
+                        content[:MAX_TOOL_RESULT_CHARS]
+                        + f"\n... (truncated from {original_len} chars for context management)"
+                    )
+                    trimmed += 1
+        if trimmed:
+            logger.info("Trimmed %d oversized tool results", trimmed)
+        return trimmed
+
     def _call_model_with_retry(self):
         for attempt in range(MAX_EMPTY_RETRIES + 1):
             self.ui.start_response()
@@ -497,10 +514,21 @@ class MyCoder:
             self.ui.end_response()
 
             if response.error:
+                is_timeout = "timeout" in response.error.lower()
                 logger.error("Model error: %s", response.error)
                 self.ui.error(f"Model error: {response.error}")
                 if attempt < MAX_EMPTY_RETRIES:
-                    self.ui.info(f"Retrying ({attempt + 1}/{MAX_EMPTY_RETRIES})...")
+                    if is_timeout:
+                        trimmed = self._trim_context()
+                        if trimmed:
+                            self.ui.info(
+                                f"Trimmed {trimmed} large tool results. "
+                                f"Retrying ({attempt + 1}/{MAX_EMPTY_RETRIES})..."
+                            )
+                        else:
+                            self.ui.info(f"Retrying ({attempt + 1}/{MAX_EMPTY_RETRIES})...")
+                    else:
+                        self.ui.info(f"Retrying ({attempt + 1}/{MAX_EMPTY_RETRIES})...")
                     continue
                 return None
 

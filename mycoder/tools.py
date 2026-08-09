@@ -8,11 +8,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file with line numbers. Always read before editing.",
+            "description": "Read a file with line numbers. For large files, use offset/limit to read a section. Files over 300 lines are auto-truncated — use offset to read further.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path to read"},
+                    "offset": {"type": "integer", "description": "Starting line number (1-based, default: 1)"},
+                    "limit": {"type": "integer", "description": "Max lines to return (default: 300)"},
                 },
                 "required": ["path"],
             },
@@ -175,22 +177,37 @@ class ToolExecutor:
             return path
         return os.path.normpath(os.path.join(self.working_dir, path))
 
-    def _read_file(self, path):
+    def _read_file(self, path, offset=1, limit=300):
         path = self._resolve(path)
         if not os.path.exists(path):
             return f"File not found: {path}"
         if os.path.isdir(path):
             return f"Is a directory: {path}. Use list_directory instead."
         size = os.path.getsize(path)
-        if size > 512_000:
-            return f"File too large ({_format_size(size)}). Read a specific section or use search_files."
+        if size > 1_000_000:
+            return f"File too large ({_format_size(size)}). Use search_files to find relevant sections."
         try:
             with open(path, "r", errors="replace") as f:
-                lines = f.readlines()
+                all_lines = f.readlines()
         except UnicodeDecodeError:
             return f"Binary file: {path}"
-        numbered = [f"{i + 1:4d} | {line.rstrip()}" for i, line in enumerate(lines)]
-        return "\n".join(numbered)
+
+        total = len(all_lines)
+        offset = max(1, int(offset or 1))
+        limit = min(int(limit or 300), 500)
+        start = offset - 1
+        end = min(start + limit, total)
+        selected = all_lines[start:end]
+
+        numbered = [f"{start + i + 1:4d} | {line.rstrip()}" for i, line in enumerate(selected)]
+        result = "\n".join(numbered)
+
+        if end < total:
+            result += f"\n... ({total - end} more lines. Use offset={end + 1} to continue reading.)"
+        if start > 0:
+            result = f"(showing lines {offset}-{end} of {total})\n" + result
+
+        return result
 
     def _write_file(self, path, content):
         path = self._resolve(path)
