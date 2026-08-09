@@ -17,7 +17,7 @@ Local AI coding assistant powered by Ollama — like Claude Code, but with your 
 
 ## Screenshot
 
-![MyCoder](assets/screenshot.png)
+![MyCoder](assets/Screenshot 2026-08-08 at 9.50.54 PM.png)
 
 ## Architecture
 
